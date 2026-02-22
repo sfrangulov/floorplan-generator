@@ -19,28 +19,52 @@ from floorplan.models import Floorplan, Space, SpaceType, OpeningType
 # ------------------------------------------------------------------ #
 # 0 = background
 # 1 = wall
-# 2 = room
+# 2 = hallway
 # 3 = corridor
-# 4 = bathroom
-# 5 = utility
-# 6 = door
-# 7 = window
+# 4 = living_room
+# 5 = bedroom
+# 6 = kitchen
+# 7 = bathroom
+# 8 = toilet
+# 9 = balcony
+# 10 = storage
+# 11 = utility
+# 12 = garage
+# 13 = terrace
+# 14 = door
+# 15 = window
 
 SPACE_TYPE_TO_CLASS: dict[SpaceType, int] = {
-    SpaceType.LIVING_ROOM: 2,
+    SpaceType.HALLWAY: 2,
     SpaceType.CORRIDOR: 3,
-    SpaceType.BATHROOM: 4,
-    SpaceType.UTILITY: 5,
+    SpaceType.LIVING_ROOM: 4,
+    SpaceType.BEDROOM: 5,
+    SpaceType.KITCHEN: 6,
+    SpaceType.BATHROOM: 7,
+    SpaceType.TOILET: 8,
+    SpaceType.BALCONY: 9,
+    SpaceType.STORAGE: 10,
+    SpaceType.UTILITY: 11,
+    SpaceType.GARAGE: 12,
+    SpaceType.TERRACE: 13,
 }
 
 CATEGORIES: list[dict[str, Any]] = [
     {"id": 1, "name": "wall", "supercategory": "structure"},
-    {"id": 2, "name": "living_room", "supercategory": "space"},
+    {"id": 2, "name": "hallway", "supercategory": "space"},
     {"id": 3, "name": "corridor", "supercategory": "space"},
-    {"id": 4, "name": "bathroom", "supercategory": "space"},
-    {"id": 5, "name": "utility", "supercategory": "space"},
-    {"id": 6, "name": "door", "supercategory": "opening"},
-    {"id": 7, "name": "window", "supercategory": "opening"},
+    {"id": 4, "name": "living_room", "supercategory": "space"},
+    {"id": 5, "name": "bedroom", "supercategory": "space"},
+    {"id": 6, "name": "kitchen", "supercategory": "space"},
+    {"id": 7, "name": "bathroom", "supercategory": "space"},
+    {"id": 8, "name": "toilet", "supercategory": "space"},
+    {"id": 9, "name": "balcony", "supercategory": "space"},
+    {"id": 10, "name": "storage", "supercategory": "space"},
+    {"id": 11, "name": "utility", "supercategory": "space"},
+    {"id": 12, "name": "garage", "supercategory": "space"},
+    {"id": 13, "name": "terrace", "supercategory": "space"},
+    {"id": 14, "name": "door", "supercategory": "opening"},
+    {"id": 15, "name": "window", "supercategory": "opening"},
 ]
 
 
@@ -144,9 +168,9 @@ class COCOAnnotator:
 
                 for opening in wall.openings:
                     if opening.type == OpeningType.DOOR:
-                        class_id = 6
+                        class_id = 14
                     else:
-                        class_id = 7
+                        class_id = 15
 
                     center_mm = p1 + wall_vec * opening.offset
                     half_width_mm = opening.width / 2.0
@@ -324,9 +348,9 @@ class COCOAnnotator:
                 # Annotations for openings on this wall
                 for opening in wall.openings:
                     if opening.type == OpeningType.DOOR:
-                        cat_id = 6
+                        cat_id = 14
                     else:
-                        cat_id = 7
+                        cat_id = 15
 
                     center_mm = p1 + wall_vec * opening.offset
                     half_w = opening.width / 2.0
@@ -387,7 +411,7 @@ class COCOAnnotator:
     # ------------------------------------------------------------------ #
 
     def get_categories(self) -> list[dict[str, Any]]:
-        """Return the list of 7 COCO category dicts."""
+        """Return the list of 15 COCO category dicts."""
         return list(CATEGORIES)
 
     # ------------------------------------------------------------------ #

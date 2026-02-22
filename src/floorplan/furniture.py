@@ -10,18 +10,20 @@ from shapely.geometry import Polygon, Point
 # Maps filename prefixes to the room types where they can appear.
 # A prefix matches if the icon filename starts with it.
 _ICON_ROOM_TYPES: dict[str, list[str]] = {
-    "bed_double": ["living_room", "bedroom"],
-    "sofa": ["living_room"],
-    "dining_table": ["living_room", "kitchen"],
-    "armchair": ["living_room"],
-    "desk": ["living_room", "bedroom", "utility"],
-    "rug": ["living_room", "bedroom"],
-    "curtain": ["living_room", "bedroom"],
-    "ottoman": ["living_room", "bathroom"],
-    "plant": ["living_room", "corridor", "bathroom", "utility"],
-    "sideboard": ["living_room", "corridor", "hallway"],
-    "sink": ["bathroom", "kitchen", "utility"],
-    "cabinet": ["utility", "bathroom", "kitchen", "storage"],
+    "bed_double":   ["bedroom"],
+    "sofa":         ["living_room"],
+    "sofa_set":     ["living_room"],
+    "sofa_corner":  ["living_room"],
+    "dining_table": ["kitchen", "living_room"],
+    "armchair":     ["living_room"],
+    "desk":         ["bedroom", "living_room"],
+    "rug":          ["living_room", "bedroom"],
+    "curtain":      ["living_room", "bedroom"],
+    "ottoman":      ["living_room", "bedroom"],
+    "plant":        ["living_room", "hallway", "corridor", "balcony"],
+    "sideboard":    ["living_room", "corridor", "hallway"],
+    "sink":         ["bathroom", "kitchen"],
+    "cabinet":      ["utility", "storage"],
 }
 
 
@@ -54,7 +56,7 @@ class FurniturePlacer:
                             break
                     if not matched:
                         # Unknown prefix → available in all room types
-                        for rt in ("living_room", "corridor", "bathroom", "utility"):
+                        for rt in ("living_room", "hallway", "corridor", "bathroom", "utility"):
                             self._icons_by_room.setdefault(rt, []).append(idx)
 
     def place_furniture(

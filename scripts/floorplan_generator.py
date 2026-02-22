@@ -31,7 +31,12 @@ def parse_range(value: str) -> tuple[int, int]:
 @click.option("--door-prob", type=float, default=0.7)
 @click.option("--window-prob", type=float, default=0.5)
 @click.option("--wall-thickness", type=float, default=120, help="Global wall thickness in mm")
-def cli(count, seed, num_rooms, output_dir, indent_prob, door_prob, window_prob, wall_thickness):
+@click.option("--layout-type", type=click.Choice(
+    ["studio", "1room", "2room", "3room", "4room",
+     "house_small", "house_medium", "house_large", "random"],
+    case_sensitive=False,
+), default=None, help="Layout type (overrides --num-rooms)")
+def cli(count, seed, num_rooms, output_dir, indent_prob, door_prob, window_prob, wall_thickness, layout_type):
     """Generate synthetic floorplan JSON files."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -39,15 +44,29 @@ def cli(count, seed, num_rooms, output_dir, indent_prob, door_prob, window_prob,
     lo, hi = parse_range(num_rooms)
     rng = np.random.default_rng(seed)
 
+    all_layout_types = ["studio", "1room", "2room", "3room", "4room",
+                        "house_small", "house_medium", "house_large"]
+
     for i in tqdm(range(count), desc="Generating floorplans"):
-        n = int(rng.integers(lo, hi + 1))
         item_seed = seed + i
 
-        cfg = GeneratorConfig(
-            num_rooms=n, seed=item_seed,
-            indent_prob=indent_prob, door_prob=door_prob,
-            window_prob=window_prob, global_wall_thickness=wall_thickness,
-        )
+        if layout_type is not None:
+            if layout_type == "random":
+                lt = all_layout_types[int(rng.integers(0, len(all_layout_types)))]
+            else:
+                lt = layout_type
+            cfg = GeneratorConfig(
+                seed=item_seed, layout_type=lt,
+                indent_prob=indent_prob, door_prob=door_prob,
+                window_prob=window_prob, global_wall_thickness=wall_thickness,
+            )
+        else:
+            n = int(rng.integers(lo, hi + 1))
+            cfg = GeneratorConfig(
+                num_rooms=n, seed=item_seed,
+                indent_prob=indent_prob, door_prob=door_prob,
+                window_prob=window_prob, global_wall_thickness=wall_thickness,
+            )
         fp = FloorplanGenerator(cfg).generate()
         fname = out / f"floorplan_{i:05d}.json"
         fname.write_text(fp.model_dump_json(indent=2))

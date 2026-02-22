@@ -70,4 +70,4 @@ def test_render_with_coco(json_dir):
             coco = json.load(f)
         assert len(coco["images"]) == 3
         assert len(coco["annotations"]) > 0
-        assert len(coco["categories"]) == 7
+        assert len(coco["categories"]) == 15

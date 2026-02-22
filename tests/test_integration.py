@@ -8,9 +8,32 @@ import pytest
 from click.testing import CliRunner
 from PIL import Image
 
+import numpy as np
+from floorplan.generator import FloorplanGenerator, GeneratorConfig
+from floorplan.renderer import FloorplanRenderer, RenderConfig
+from floorplan.styles import generate_style
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from floorplan_generator import cli as gen_cli
 from generate_synthetic import cli as synth_cli
+
+
+def test_full_pipeline_with_layout_type():
+    """Test layout-type generation produces valid floorplan with all expected rooms."""
+    cfg = GeneratorConfig(seed=42, layout_type="2room")
+    fp = FloorplanGenerator(cfg).generate()
+    types = [s.type.value for s in fp.spaces]
+    assert len(fp.spaces) >= 5  # At least the required rooms
+    assert fp.spaces[0].type.value == "hallway"
+    assert "kitchen" in types
+    assert "living_room" in types
+    assert "bedroom" in types
+    assert "bathroom" in types
+
+    style = generate_style(np.random.default_rng(42))
+    renderer = FloorplanRenderer(RenderConfig(image_size=512))
+    img = renderer.render(fp, style)
+    assert img.size == (512, 512)
 
 
 def test_full_pipeline():
@@ -61,7 +84,7 @@ def test_full_pipeline():
         with open(coco_path) as f:
             coco = json.load(f)
         assert len(coco["images"]) == 5
-        assert len(coco["categories"]) == 7
+        assert len(coco["categories"]) == 15
         assert len(coco["annotations"]) >= 5  # at least 1 per image
 
         # Verify annotation references valid images

@@ -20,7 +20,6 @@ def test_get_room_list_deterministic():
     assert "bedroom" in rooms
 
 
-@pytest.mark.skip(reason="Requires expanded SpaceType enum from Task 1")
 def test_room_specs_have_all_types():
     from floorplan.models import SpaceType
     for st in SpaceType:

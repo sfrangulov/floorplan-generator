@@ -297,9 +297,11 @@ class FloorplanGenerator:
             # No parent constraints; treat as fallback
             return False
 
-        # Find candidate parent indices (rooms whose type is in allowed list)
+        # Find candidate parent indices (rooms whose type is in allowed list
+        # and passes NEVER_CONNECT validation)
         candidate_indices = [
-            i for i, rt in enumerate(room_type_strs) if rt in allowed
+            i for i, rt in enumerate(room_type_strs)
+            if rt in allowed and can_connect(room_str, rt)
         ]
         if not candidate_indices:
             return False
@@ -616,10 +618,13 @@ class FloorplanGenerator:
                         # Fallback to config probability
                         place_window = self.rng.random() < cfg.window_prob
 
-                    if (
-                        place_window
-                        and wall_length >= cfg.window_width * 1.2
-                    ):
+                    # For must_have_window rooms, relax length check to exact fit
+                    if spec is not None and spec.must_have_window:
+                        min_wall_for_window = cfg.window_width
+                    else:
+                        min_wall_for_window = cfg.window_width * 1.2
+
+                    if place_window and wall_length >= min_wall_for_window:
                         offset = self.rng.uniform(0.1, 0.9)
                         # Ensure window fits within wall
                         half_w = cfg.window_width / (2 * wall_length)

@@ -56,7 +56,12 @@ def test_coco_json_structure(sample_floorplan):
 def test_coco_categories():
     ann = COCOAnnotator(image_size=512)
     cats = ann.get_categories()
-    assert len(cats) == 7  # wall, room, corridor, bathroom, utility, door, window
+    assert len(cats) == 15  # wall + 12 spaces + door + window
     names = {c["name"] for c in cats}
     assert "wall" in names
+    assert "hallway" in names
     assert "living_room" in names
+    assert "bedroom" in names
+    assert "kitchen" in names
+    assert "door" in names
+    assert "window" in names
