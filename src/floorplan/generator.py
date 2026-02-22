@@ -27,6 +27,56 @@ from floorplan.models import (
     SpaceType,
     OpeningType,
 )
+from floorplan.layout_templates import ROOM_SPECS, get_room_list
+from floorplan.adjacency import (
+    ALLOWED_PARENTS,
+    MUST_HAVE_EXTERNAL_WALL,
+    can_connect,
+    get_allowed_parents,
+)
+
+
+def _attach_room_outward(
+    wall_start: np.ndarray,
+    wall_end: np.ndarray,
+    new_width: float,
+    new_height: float,
+    parent_poly: Polygon,
+    rng: np.random.Generator,
+) -> Polygon:
+    """Attach a room to a wall segment, ensuring it extends outward from the parent.
+
+    Tries the default normal direction first; if the resulting polygon overlaps
+    with the parent, flips the normal to the opposite side.
+    """
+    wall_vec = wall_end - wall_start
+    wall_length = float(np.linalg.norm(wall_vec))
+    if wall_length < 1e-6:
+        return Polygon()
+    wall_dir = wall_vec / wall_length
+
+    max_offset = max(0, wall_length - new_width)
+    offset = rng.uniform(0, max_offset) if max_offset > 0 else 0
+
+    clamped_w = min(new_width, wall_length)
+
+    for sign in (1.0, -1.0):
+        normal = sign * np.array([wall_dir[1], -wall_dir[0]])
+        p0 = wall_start + wall_dir * offset
+        p1 = p0 + wall_dir * clamped_w
+        p2 = p1 + normal * new_height
+        p3 = p0 + normal * new_height
+        coords = [tuple(p0), tuple(p1), tuple(p2), tuple(p3)]
+        poly = Polygon(coords)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            continue
+        # Check if it overlaps with parent
+        if not polygons_overlap(poly, parent_poly):
+            return poly
+    # Both sides overlap; return last attempt anyway
+    return poly
 
 
 @dataclass
@@ -54,6 +104,7 @@ class GeneratorConfig:
     seed: int = 42
     grid_size: float = 10.0
     max_attach_attempts: int = 50
+    layout_type: str | None = None
 
 
 class FloorplanGenerator:
@@ -66,6 +117,9 @@ class FloorplanGenerator:
     def generate(self) -> Floorplan:
         """Main generation method."""
         cfg = self.config
+
+        if cfg.layout_type is not None:
+            return self._generate_with_layout()
 
         # Phase 1: Create room polygons using growing-structure algorithm
         polygons: list[Polygon] = []
@@ -139,6 +193,242 @@ class FloorplanGenerator:
         return Floorplan(meta=meta, spaces=all_spaces)
 
     # ------------------------------------------------------------------ #
+    # Layout-aware generation
+    # ------------------------------------------------------------------ #
+
+    def _generate_with_layout(self) -> Floorplan:
+        """Generate a floorplan using a layout template with adjacency rules."""
+        cfg = self.config
+        room_list = get_room_list(cfg.layout_type, self.rng)  # type: ignore[arg-type]
+
+        # Layout mode uses more attempts per room to ensure successful placement
+        layout_max_attempts = max(cfg.max_attach_attempts, 200)
+
+        polygons: list[Polygon] = []
+        room_types: list[SpaceType] = []
+        room_type_strs: list[str] = []
+
+        # First room (hallway) is placed at origin as a simple rectangle
+        # (no indentation to maximise attachment surface for subsequent rooms)
+        first_type_str = room_list[0]
+        first_stype = SpaceType(first_type_str)
+        w, h = self._room_dimensions(first_stype)
+        first_poly = create_rectangle(0, 0, w, h)
+        first_poly = self._snap_polygon(first_poly)
+        polygons.append(first_poly)
+        room_types.append(first_stype)
+        room_type_strs.append(first_type_str)
+
+        # Attach remaining rooms following adjacency rules
+        for room_str in room_list[1:]:
+            placed = self._try_place_room_with_layout(
+                room_str, polygons, room_types, room_type_strs,
+                layout_max_attempts,
+            )
+            if not placed:
+                # Fallback: try attaching to any existing room
+                placed = self._try_place_room_fallback(
+                    room_str, polygons, room_types, room_type_strs,
+                    layout_max_attempts,
+                )
+            # If still not placed, skip this room
+
+        num_placed = len(polygons)
+
+        # Build spaces with wall classification
+        all_spaces: list[Space] = []
+        for idx in range(num_placed):
+            space_id = f"space_{idx + 1:03d}"
+            poly = polygons[idx]
+            stype = room_types[idx]
+
+            coords = list(poly.exterior.coords)
+            polygon_coords = [[c[0], c[1]] for c in coords[:-1]]
+
+            wall_classifications = classify_external_walls(idx, polygons)
+            walls: list[Wall] = []
+            for (seg_start, seg_end), is_external in wall_classifications:
+                thickness = cfg.global_wall_thickness
+                if self.rng.random() < cfg.wall_thickness_variation_prob:
+                    mult = self.rng.uniform(*cfg.wall_thickness_multiplier_range)
+                    thickness = cfg.global_wall_thickness * mult
+
+                walls.append(
+                    Wall(
+                        p1=[seg_start[0], seg_start[1]],
+                        p2=[seg_end[0], seg_end[1]],
+                        thickness=thickness,
+                        is_external=is_external,
+                        openings=[],
+                    )
+                )
+
+            space = Space(
+                id=space_id,
+                type=stype,
+                polygon=polygon_coords,
+                walls=walls,
+            )
+            all_spaces.append(space)
+
+        # Place openings using room-type-specific rules
+        self._place_openings(all_spaces, polygons)
+
+        # Ensure connectivity
+        self._ensure_connectivity(all_spaces, polygons)
+
+        meta = FloorplanMeta(
+            seed=cfg.seed,
+            global_wall_thickness=cfg.global_wall_thickness,
+        )
+        return Floorplan(meta=meta, spaces=all_spaces)
+
+    def _try_place_room_with_layout(
+        self,
+        room_str: str,
+        polygons: list[Polygon],
+        room_types: list[SpaceType],
+        room_type_strs: list[str],
+        max_attempts: int,
+    ) -> bool:
+        """Try to attach a room to a valid parent per ALLOWED_PARENTS rules."""
+        allowed = get_allowed_parents(room_str)
+        if not allowed:
+            # No parent constraints; treat as fallback
+            return False
+
+        # Find candidate parent indices (rooms whose type is in allowed list)
+        candidate_indices = [
+            i for i, rt in enumerate(room_type_strs) if rt in allowed
+        ]
+        if not candidate_indices:
+            return False
+
+        new_stype = SpaceType(room_str)
+        must_external = room_str in MUST_HAVE_EXTERNAL_WALL
+
+        for _ in range(max_attempts):
+            parent_idx = int(self.rng.choice(candidate_indices))
+            result = self._attach_to_parent_layout(
+                parent_idx, new_stype, must_external, polygons, room_types
+            )
+            if result is not None:
+                polygons.append(result)
+                room_types.append(new_stype)
+                room_type_strs.append(room_str)
+                return True
+
+        return False
+
+    def _try_place_room_fallback(
+        self,
+        room_str: str,
+        polygons: list[Polygon],
+        room_types: list[SpaceType],
+        room_type_strs: list[str],
+        max_attempts: int,
+    ) -> bool:
+        """Fallback: try attaching to any room, ignoring ALLOWED_PARENTS."""
+        new_stype = SpaceType(room_str)
+        must_external = room_str in MUST_HAVE_EXTERNAL_WALL
+
+        for _ in range(max_attempts):
+            parent_idx = int(self.rng.integers(0, len(polygons)))
+            # Still respect NEVER_CONNECT
+            if not can_connect(room_str, room_type_strs[parent_idx]):
+                continue
+            result = self._attach_to_parent_layout(
+                parent_idx, new_stype, must_external, polygons, room_types
+            )
+            if result is not None:
+                polygons.append(result)
+                room_types.append(new_stype)
+                room_type_strs.append(room_str)
+                return True
+
+        return False
+
+    def _attach_to_parent_layout(
+        self,
+        parent_idx: int,
+        new_stype: SpaceType,
+        must_external: bool,
+        polygons: list[Polygon],
+        room_types: list[SpaceType],
+    ) -> Polygon | None:
+        """Try to attach a new room to a parent's external wall (layout mode).
+
+        Uses _attach_room_outward to ensure the room extends away from the
+        parent polygon rather than into it. Tries multiple dimension variants
+        (original, swapped, minimum) to improve placement success rate.
+
+        Returns the new polygon if successful, None otherwise.
+        """
+        cfg = self.config
+
+        ext_walls = classify_external_walls(parent_idx, polygons)
+        external_segs = [(s, e) for (s, e), is_ext in ext_walls if is_ext]
+        if not external_segs:
+            return None
+
+        seg_idx = int(self.rng.integers(0, len(external_segs)))
+        seg_start, seg_end = external_segs[seg_idx]
+
+        wall_start = np.array(seg_start)
+        wall_end = np.array(seg_end)
+        parent_poly = polygons[parent_idx]
+
+        new_w, new_h = self._room_dimensions(new_stype)
+
+        # Try the room as-is, then with swapped dims, then with minimum dims
+        candidates = [(new_w, new_h)]
+        if abs(new_w - new_h) > 100:
+            candidates.append((new_h, new_w))
+        type_key = new_stype.value
+        if type_key in ROOM_SPECS:
+            spec = ROOM_SPECS[type_key]
+            candidates.append((spec.width_min, spec.height_min))
+            candidates.append((spec.height_min, spec.width_min))
+
+        for cw, ch in candidates:
+            new_poly = _attach_room_outward(
+                wall_start, wall_end, cw, ch, parent_poly, self.rng
+            )
+            new_poly = self._snap_polygon(new_poly)
+
+            if not new_poly.is_valid or new_poly.is_empty:
+                continue
+
+            # Check overlap with ALL existing polygons
+            has_overlap = False
+            for existing in polygons:
+                if polygons_overlap(new_poly, existing):
+                    has_overlap = True
+                    break
+            if has_overlap:
+                continue
+
+            # Check max extent
+            all_polys_candidate = polygons + [new_poly]
+            union = unary_union(all_polys_candidate)
+            minx, miny, maxx, maxy = union.bounds
+            if (maxx - minx) > cfg.max_extent or (maxy - miny) > cfg.max_extent:
+                continue
+
+            # If room must have external wall, verify it does
+            if must_external:
+                test_idx = len(polygons)
+                test_polys = polygons + [new_poly]
+                new_ext_walls = classify_external_walls(test_idx, test_polys)
+                has_external = any(is_ext for _, is_ext in new_ext_walls)
+                if not has_external:
+                    continue
+
+            return new_poly
+
+        return None
+
+    # ------------------------------------------------------------------ #
     # Room type selection
     # ------------------------------------------------------------------ #
 
@@ -165,30 +455,23 @@ class FloorplanGenerator:
     # ------------------------------------------------------------------ #
 
     def _room_dimensions(self, stype: SpaceType) -> tuple[float, float]:
-        """Return (width, height) for a room based on type."""
+        """Return (width, height) for a room based on type.
+
+        When ROOM_SPECS contains the type, use spec-based ranges.
+        Otherwise fall back to config-based ranges for backward compat.
+        """
+        type_key = stype.value
+        if type_key in ROOM_SPECS:
+            spec = ROOM_SPECS[type_key]
+            w = self.rng.uniform(spec.width_min, spec.width_max)
+            h = self.rng.uniform(spec.height_min, spec.height_max)
+            return w, h
+
+        # Fallback for any unknown type (should not happen with current SpaceType)
         cfg = self.config
-        if stype == SpaceType.CORRIDOR:
-            # Corridors are elongated
-            short = self.rng.uniform(cfg.min_room_size * 0.4, cfg.min_room_size * 0.6)
-            long = self.rng.uniform(cfg.max_room_size * 0.8, cfg.max_room_size * 1.2)
-            if self.rng.random() < 0.5:
-                return long, short
-            return short, long
-        elif stype == SpaceType.BATHROOM:
-            # Bathrooms are smaller
-            w = self.rng.uniform(cfg.min_room_size * 0.5, cfg.min_room_size * 0.8)
-            h = self.rng.uniform(cfg.min_room_size * 0.5, cfg.min_room_size * 0.8)
-            return w, h
-        elif stype == SpaceType.UTILITY:
-            # Utility rooms are smaller
-            w = self.rng.uniform(cfg.min_room_size * 0.5, cfg.min_room_size * 0.9)
-            h = self.rng.uniform(cfg.min_room_size * 0.5, cfg.min_room_size * 0.9)
-            return w, h
-        else:
-            # Regular room
-            w = self.rng.uniform(cfg.min_room_size, cfg.max_room_size)
-            h = self.rng.uniform(cfg.min_room_size, cfg.max_room_size)
-            return w, h
+        w = self.rng.uniform(cfg.min_room_size, cfg.max_room_size)
+        h = self.rng.uniform(cfg.min_room_size, cfg.max_room_size)
+        return w, h
 
     # ------------------------------------------------------------------ #
     # Room polygon creation
@@ -302,10 +585,18 @@ class FloorplanGenerator:
     def _place_openings(
         self, spaces: list[Space], polygons: list[Polygon]
     ) -> None:
-        """Place doors on internal walls, windows on external walls."""
+        """Place doors on internal walls, windows on external walls.
+
+        When a room type is found in ROOM_SPECS, uses spec-based door widths
+        and window rules (must_have_window / may_have_window). Otherwise falls
+        back to config-based probabilities.
+        """
         cfg = self.config
 
         for space in spaces:
+            type_key = space.type.value
+            spec = ROOM_SPECS.get(type_key)
+
             for wall in space.walls:
                 wall_length = np.sqrt(
                     (wall.p2[0] - wall.p1[0]) ** 2
@@ -313,9 +604,20 @@ class FloorplanGenerator:
                 )
 
                 if wall.is_external:
-                    # Window placement
+                    # Window placement using room-type-specific rules
+                    place_window = False
+                    if spec is not None:
+                        if spec.must_have_window:
+                            place_window = True
+                        elif spec.may_have_window:
+                            place_window = self.rng.random() < 0.5
+                        # else: no windows (e.g., hallway, corridor, storage)
+                    else:
+                        # Fallback to config probability
+                        place_window = self.rng.random() < cfg.window_prob
+
                     if (
-                        self.rng.random() < cfg.window_prob
+                        place_window
                         and wall_length >= cfg.window_width * 1.2
                     ):
                         offset = self.rng.uniform(0.1, 0.9)
@@ -331,18 +633,26 @@ class FloorplanGenerator:
                         )
                 else:
                     # Door placement on internal walls
+                    # Use spec-based door width if available
+                    if spec is not None:
+                        door_w = self.rng.uniform(
+                            spec.door_width_min, spec.door_width_max
+                        )
+                    else:
+                        door_w = cfg.door_width
+
                     if (
                         self.rng.random() < cfg.door_prob
-                        and wall_length >= cfg.door_width * 1.2
+                        and wall_length >= door_w * 1.2
                     ):
                         offset = self.rng.uniform(0.15, 0.85)
-                        half_d = cfg.door_width / (2 * wall_length)
+                        half_d = door_w / (2 * wall_length)
                         offset = max(half_d, min(1 - half_d, offset))
                         swing = self.rng.choice(["left", "right"])
                         wall.openings.append(
                             Opening(
                                 type=OpeningType.DOOR,
-                                width=cfg.door_width,
+                                width=door_w,
                                 offset=round(offset, 4),
                                 swing=swing,
                             )
