@@ -326,8 +326,8 @@ class FloorplanRenderer:
             normal_px = normal_px / norm_len
 
         # Arc bounding box centered on hinge
-        max_radius = max(15.0, self.config.image_size * 0.08)
-        radius = min(door_width_px, max_radius)
+        max_radius = max(8.0, self.config.image_size * 0.03)
+        radius = min(door_width_px * 0.5, max_radius)
         if radius < 4:
             return
         bbox = [
