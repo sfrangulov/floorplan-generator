@@ -59,4 +59,4 @@ def test_coco_categories():
     assert len(cats) == 7  # wall, room, corridor, bathroom, utility, door, window
     names = {c["name"] for c in cats}
     assert "wall" in names
-    assert "room" in names
+    assert "living_room" in names

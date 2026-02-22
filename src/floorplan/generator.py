@@ -145,7 +145,7 @@ class FloorplanGenerator:
     def _pick_room_type(self, parent_type: Optional[SpaceType]) -> SpaceType:
         """Pick a room type using configured probabilities, with constraints."""
         cfg = self.config
-        types = [SpaceType.ROOM, SpaceType.CORRIDOR, SpaceType.BATHROOM, SpaceType.UTILITY]
+        types = [SpaceType.LIVING_ROOM, SpaceType.CORRIDOR, SpaceType.BATHROOM, SpaceType.UTILITY]
         probs = [cfg.room_prob, cfg.corridor_prob, cfg.bathroom_prob, cfg.utility_prob]
 
         # Constraint: bathroom only attaches to corridor or room, not another bathroom

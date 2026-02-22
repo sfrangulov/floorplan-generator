@@ -28,11 +28,11 @@ def test_wall_creation():
 def test_space_creation():
     s = Space(
         id="space_001",
-        type=SpaceType.ROOM,
+        type=SpaceType.LIVING_ROOM,
         polygon=[[0, 0], [3000, 0], [3000, 4000], [0, 4000]],
         walls=[]
     )
-    assert s.type == SpaceType.ROOM
+    assert s.type == SpaceType.LIVING_ROOM
     assert len(s.polygon) == 4
 
 
@@ -42,7 +42,7 @@ def test_floorplan_roundtrip_json():
         spaces=[
             Space(
                 id="space_001",
-                type=SpaceType.ROOM,
+                type=SpaceType.LIVING_ROOM,
                 polygon=[[0, 0], [3000, 0], [3000, 4000], [0, 4000]],
                 walls=[
                     Wall(p1=[0, 0], p2=[3000, 0], thickness=120,
@@ -56,6 +56,11 @@ def test_floorplan_roundtrip_json():
     assert fp2.meta.seed == 42
     assert len(fp2.spaces) == 1
     assert fp2.spaces[0].id == "space_001"
+
+
+def test_legacy_room_type_migration():
+    space = Space(id="s1", type="room", polygon=[[0, 0], [1, 0], [1, 1]])
+    assert space.type == SpaceType.LIVING_ROOM
 
 
 def test_floorplan_invalid_offset_rejected():

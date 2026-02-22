@@ -8,10 +8,18 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class SpaceType(str, Enum):
-    ROOM = "room"
+    HALLWAY = "hallway"
     CORRIDOR = "corridor"
+    LIVING_ROOM = "living_room"
+    BEDROOM = "bedroom"
+    KITCHEN = "kitchen"
     BATHROOM = "bathroom"
+    TOILET = "toilet"
+    BALCONY = "balcony"
+    STORAGE = "storage"
     UTILITY = "utility"
+    GARAGE = "garage"
+    TERRACE = "terrace"
 
 
 class OpeningType(str, Enum):
@@ -48,6 +56,13 @@ class Space(BaseModel):
     type: SpaceType
     polygon: list[list[float]] = Field(min_length=3)
     walls: list[Wall] = Field(default_factory=list)
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def migrate_legacy_type(cls, v):
+        if v == "room":
+            return "living_room"
+        return v
 
 
 class FloorplanMeta(BaseModel):

@@ -116,7 +116,7 @@ def test_room_types_present():
     )
     fp = FloorplanGenerator(cfg).generate()
     types = {s.type for s in fp.spaces}
-    assert SpaceType.ROOM in types
+    assert SpaceType.LIVING_ROOM in types
 
 
 def test_max_extent_respected():

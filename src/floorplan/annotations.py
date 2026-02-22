@@ -27,7 +27,7 @@ from floorplan.models import Floorplan, Space, SpaceType, OpeningType
 # 7 = window
 
 SPACE_TYPE_TO_CLASS: dict[SpaceType, int] = {
-    SpaceType.ROOM: 2,
+    SpaceType.LIVING_ROOM: 2,
     SpaceType.CORRIDOR: 3,
     SpaceType.BATHROOM: 4,
     SpaceType.UTILITY: 5,
@@ -35,7 +35,7 @@ SPACE_TYPE_TO_CLASS: dict[SpaceType, int] = {
 
 CATEGORIES: list[dict[str, Any]] = [
     {"id": 1, "name": "wall", "supercategory": "structure"},
-    {"id": 2, "name": "room", "supercategory": "space"},
+    {"id": 2, "name": "living_room", "supercategory": "space"},
     {"id": 3, "name": "corridor", "supercategory": "space"},
     {"id": 4, "name": "bathroom", "supercategory": "space"},
     {"id": 5, "name": "utility", "supercategory": "space"},

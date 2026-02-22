@@ -12,7 +12,7 @@ def test_programmatic_furniture_draws():
     poly = Polygon([(20, 20), (180, 20), (180, 180), (20, 180)])
     placer = FurniturePlacer(furniture_dir=None)
     rng = np.random.default_rng(42)
-    placer.place_furniture(draw, poly, "room", rng, density=0.8,
+    placer.place_furniture(draw, poly, "living_room", rng, density=0.8,
                            transform={"scale": 1.0, "offset_x": 0, "offset_y": 0})
     pixels = list(img.getdata())
     white_count = sum(1 for p in pixels if p == (255, 255, 255))
@@ -25,7 +25,7 @@ def test_no_furniture_at_zero_density():
     poly = Polygon([(20, 20), (180, 20), (180, 180), (20, 180)])
     placer = FurniturePlacer(furniture_dir=None)
     rng = np.random.default_rng(42)
-    placer.place_furniture(draw, poly, "room", rng, density=0.0,
+    placer.place_furniture(draw, poly, "living_room", rng, density=0.0,
                            transform={"scale": 1.0, "offset_x": 0, "offset_y": 0})
     pixels = list(img.getdata())
     white_count = sum(1 for p in pixels if p == (255, 255, 255))
