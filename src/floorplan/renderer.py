@@ -76,17 +76,29 @@ class FloorplanRenderer:
                     elif opening.type == OpeningType.WINDOW:
                         self._draw_window(draw, wall, opening, style, transform)
 
-        # 4. Dimension lines
-        if style.show_dimensions:
-            for space in floorplan.spaces:
-                for wall in space.walls:
-                    self._draw_dimension(draw, wall, transform, style)
+        # 4+5. Shared collision tracking for dimensions and labels
+        occupied_rects: list[tuple[float, float, float, float]] = []
 
-        # 5. Labels
-        if style.show_labels:
-            placed_labels: list[tuple[float, float, float, float]] = []
+        if style.show_dimensions:
+            drawn_dim_walls: set[tuple] = set()
             for space in floorplan.spaces:
-                self._draw_label(draw, space, style, transform, placed_labels)
+                drawn_lengths: set[int] = set()
+                for wall in space.walls:
+                    key = self._wall_key(wall)
+                    if key in drawn_dim_walls:
+                        continue
+                    drawn_dim_walls.add(key)
+                    wall_len = int(round(float(np.linalg.norm(
+                        np.array(wall.p2) - np.array(wall.p1)
+                    ))))
+                    if wall_len in drawn_lengths:
+                        continue
+                    drawn_lengths.add(wall_len)
+                    self._draw_dimension(draw, wall, transform, style, occupied_rects)
+
+        if style.show_labels:
+            for space in floorplan.spaces:
+                self._draw_label(draw, space, style, transform, occupied_rects)
 
         return img
 
@@ -282,7 +294,7 @@ class FloorplanRenderer:
         door_start_px = np.array(self._to_px(door_start_mm[0], door_start_mm[1], transform))
         door_end_px = np.array(self._to_px(door_end_mm[0], door_end_mm[1], transform))
 
-        # Clear wall segment behind door (draw background color)
+        # Clear wall segment behind door
         clear_width = max(int(wall.thickness * transform["scale"]) + 2, style.line_width + 2, 3)
         draw.line(
             [tuple(door_start_px), tuple(door_end_px)],
@@ -420,15 +432,22 @@ class FloorplanRenderer:
     # Dimension lines
     # ------------------------------------------------------------------ #
 
-    def _draw_dimension(self, draw: ImageDraw.ImageDraw, wall: Wall, transform: dict, style) -> None:
+    def _draw_dimension(
+        self,
+        draw: ImageDraw.ImageDraw,
+        wall: Wall,
+        transform: dict,
+        style,
+        occupied_rects: list[tuple[float, float, float, float]],
+    ) -> None:
         """Draw dimension line with arrows and mm text offset from wall."""
         p1 = np.array(wall.p1)
         p2 = np.array(wall.p2)
         wall_vec = p2 - p1
         wall_len_mm = float(np.linalg.norm(wall_vec))
 
-        if wall_len_mm < 100:
-            return  # Skip very short walls
+        if wall_len_mm < 500:
+            return  # Skip short walls (too small to label usefully)
 
         wall_dir = wall_vec / wall_len_mm
         normal = np.array([-wall_dir[1], wall_dir[0]])
@@ -481,8 +500,14 @@ class FloorplanRenderer:
                 th = bbox[3] - bbox[1]
             except Exception:
                 tw, th = len(text) * 6, 10
-            text_pos = (mid_px[0] - tw / 2, mid_px[1] - th / 2)
-            draw.text(text_pos, text, fill=dim_color, font=font)
+            text_x = mid_px[0] - tw / 2
+            text_y = mid_px[1] - th / 2
+            text_bbox = (text_x - 1, text_y - 1, text_x + tw + 1, text_y + th + 1)
+            if self._bbox_overlaps(text_bbox, occupied_rects):
+                return  # skip text, don't clutter
+            occupied_rects.append(text_bbox)
+            draw.rectangle(text_bbox, fill=style.bg_color)
+            draw.text((text_x, text_y), text, fill=dim_color, font=font)
 
     # ------------------------------------------------------------------ #
     # Room labels
@@ -494,7 +519,7 @@ class FloorplanRenderer:
         space: Space,
         style,
         transform: dict,
-        placed_labels: list[tuple[float, float, float, float]],
+        occupied_rects: list[tuple[float, float, float, float]],
     ) -> None:
         """Draw room type label inside the polygon with adaptive sizing and overlap avoidance."""
         try:
@@ -511,7 +536,7 @@ class FloorplanRenderer:
             cy = sum(ys) / len(ys)
 
         px, py = self._to_px(cx, cy, transform)
-        label = space.type.value.upper()
+        label = space.type.value.replace("_", " ").upper()
 
         # Scale font size based on room area in pixel space
         try:
@@ -542,18 +567,26 @@ class FloorplanRenderer:
 
         text_x = px - tw / 2
         text_y = py - th / 2
-        label_bbox = (text_x, text_y, text_x + tw, text_y + th)
 
-        # Check for overlap with already-placed labels and nudge if needed
-        for _ in range(4):
-            if not self._bbox_overlaps(label_bbox, placed_labels):
+        # Try placement at center, then 8 nudge directions
+        offsets = [
+            (0, 0),
+            (0, th + 4), (0, -(th + 4)),
+            (tw + 4, 0), (-(tw + 4), 0),
+            (tw, th + 2), (-tw, th + 2),
+            (tw, -(th + 2)), (-tw, -(th + 2)),
+        ]
+        placed = False
+        for dx, dy in offsets:
+            candidate = (text_x + dx, text_y + dy, text_x + dx + tw, text_y + dy + th)
+            if not self._bbox_overlaps(candidate, occupied_rects):
+                text_x += dx
+                text_y += dy
+                placed = True
                 break
-            # Nudge downward
-            text_y += th + 2
-            label_bbox = (text_x, text_y, text_x + tw, text_y + th)
 
-        # If still overlapping after nudges, shrink font
-        if self._bbox_overlaps(label_bbox, placed_labels):
+        if not placed:
+            # Shrink font and try center only
             font_size = max(7, font_size - 3)
             try:
                 font = ImageFont.truetype("Arial", font_size)
@@ -568,8 +601,11 @@ class FloorplanRenderer:
             text_x = px - tw / 2
             text_y = py - th / 2
             label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+            if self._bbox_overlaps(label_bbox, occupied_rects):
+                return  # skip entirely rather than overlap
 
-        placed_labels.append(label_bbox)
+        label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+        occupied_rects.append(label_bbox)
         draw.text((text_x, text_y), label, fill=style.wall_color, font=font)
 
     @staticmethod
