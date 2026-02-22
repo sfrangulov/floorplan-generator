@@ -94,7 +94,7 @@ class FloorplanRenderer:
                     if wall_len in drawn_lengths:
                         continue
                     drawn_lengths.add(wall_len)
-                    self._draw_dimension(draw, wall, transform, style, occupied_rects)
+                    self._draw_dimension(img, draw, wall, transform, style, occupied_rects)
 
         if style.show_labels:
             for space in floorplan.spaces:
@@ -502,11 +502,10 @@ class FloorplanRenderer:
                 tw, th = len(text) * 6, 10
             text_x = mid_px[0] - tw / 2
             text_y = mid_px[1] - th / 2
-            text_bbox = (text_x - 1, text_y - 1, text_x + tw + 1, text_y + th + 1)
+            text_bbox = (text_x - 3, text_y - 3, text_x + tw + 3, text_y + th + 3)
             if self._bbox_overlaps(text_bbox, occupied_rects):
                 return  # skip text, don't clutter
             occupied_rects.append(text_bbox)
-            draw.rectangle(text_bbox, fill=style.bg_color)
             draw.text((text_x, text_y), text, fill=dim_color, font=font)
 
     # ------------------------------------------------------------------ #
