@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from floorplan.models import Floorplan, Space, Wall, Opening, OpeningType
 
@@ -434,6 +434,7 @@ class FloorplanRenderer:
 
     def _draw_dimension(
         self,
+        img: Image.Image,
         draw: ImageDraw.ImageDraw,
         wall: Wall,
         transform: dict,
@@ -500,13 +501,43 @@ class FloorplanRenderer:
                 th = bbox[3] - bbox[1]
             except Exception:
                 tw, th = len(text) * 6, 10
-            text_x = mid_px[0] - tw / 2
-            text_y = mid_px[1] - th / 2
-            text_bbox = (text_x - 3, text_y - 3, text_x + tw + 3, text_y + th + 3)
+
+            # Compute wall angle for text rotation
+            angle_rad = math.atan2(
+                -(dim_p2_px[1] - dim_p1_px[1]),
+                dim_p2_px[0] - dim_p1_px[0],
+            )
+            angle_deg = math.degrees(angle_rad)
+            # Keep text readable (never upside-down)
+            if angle_deg > 90:
+                angle_deg -= 180
+            elif angle_deg < -90:
+                angle_deg += 180
+
+            # Render text on temporary RGBA image, rotate, paste
+            pad = 4
+            tmp_w = tw + 2 * pad
+            tmp_h = th + 2 * pad
+            txt_img = Image.new("RGBA", (tmp_w, tmp_h), (0, 0, 0, 0))
+            txt_draw = ImageDraw.Draw(txt_img)
+            txt_draw.text((pad, pad), text, fill=dim_color, font=font)
+            rotated = txt_img.rotate(angle_deg, expand=True, resample=Image.BICUBIC)
+
+            rw, rh = rotated.size
+            paste_x = int(mid_px[0] - rw / 2)
+            paste_y = int(mid_px[1] - rh / 2)
+
+            text_bbox = (paste_x - 3, paste_y - 3, paste_x + rw + 3, paste_y + rh + 3)
             if self._bbox_overlaps(text_bbox, occupied_rects):
-                return  # skip text, don't clutter
+                return
             occupied_rects.append(text_bbox)
-            draw.text((text_x, text_y), text, fill=dim_color, font=font)
+
+            # Paste onto main image (convert to RGB paste if needed)
+            if img.mode == "RGB":
+                # Create RGB version + use alpha as mask
+                img.paste(rotated.convert("RGB"), (paste_x, paste_y), rotated.split()[3])
+            else:
+                img.paste(rotated, (paste_x, paste_y), rotated)
 
     # ------------------------------------------------------------------ #
     # Room labels
@@ -521,48 +552,77 @@ class FloorplanRenderer:
         occupied_rects: list[tuple[float, float, float, float]],
     ) -> None:
         """Draw room type label inside the polygon with adaptive sizing and overlap avoidance."""
+        # Build polygon in mm space
         try:
-            poly = Polygon([(pt[0], pt[1]) for pt in space.polygon])
-            if poly.is_empty or not poly.is_valid:
+            poly_mm = Polygon([(pt[0], pt[1]) for pt in space.polygon])
+            if poly_mm.is_empty or not poly_mm.is_valid:
                 return
-            # representative_point() is guaranteed to be inside the polygon
-            rep = poly.representative_point()
+            rep = poly_mm.representative_point()
             cx, cy = rep.x, rep.y
         except Exception:
             xs = [pt[0] for pt in space.polygon]
             ys = [pt[1] for pt in space.polygon]
             cx = sum(xs) / len(xs)
             cy = sum(ys) / len(ys)
+            poly_mm = None
+
+        # Build pixel-space polygon for containment checks
+        px_pts = [self._to_px(pt[0], pt[1], transform) for pt in space.polygon]
+        try:
+            poly_px = Polygon(px_pts)
+            if poly_px.is_empty or not poly_px.is_valid:
+                poly_px = None
+        except Exception:
+            poly_px = None
 
         px, py = self._to_px(cx, cy, transform)
         label = space.type.value.replace("_", " ").upper()
 
-        # Scale font size based on room area in pixel space
+        # Compute available space from polygon bounds
+        if poly_px is not None:
+            minx, miny, maxx, maxy = poly_px.bounds
+            avail_w = maxx - minx - 8
+            avail_h = maxy - miny - 8
+        else:
+            avail_w, avail_h = 200, 200
+
+        if avail_w < 20 or avail_h < 8:
+            return  # room too small for any label
+
+        # Determine starting font size from room area
         try:
-            area_mm2 = poly.area
+            area_mm2 = poly_mm.area if poly_mm else 1e6
         except Exception:
             area_mm2 = 1e6
         area_px2 = area_mm2 * (transform["scale"] ** 2)
         font_size = int(math.sqrt(area_px2) * 0.12)
-        font_size = max(8, min(font_size, 16))
+        font_size = max(6, min(font_size, 16))
 
-        try:
-            font = ImageFont.truetype("Arial", font_size)
-        except (OSError, IOError):
+        # Shrink font until text fits available space
+        font = None
+        tw, th = 0, 0
+        while font_size >= 6:
             try:
-                font = ImageFont.load_default()
+                font = ImageFont.truetype("Arial", font_size)
+            except (OSError, IOError):
+                try:
+                    font = ImageFont.load_default()
+                except Exception:
+                    return
+            try:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw = bbox[2] - bbox[0]
+                th = bbox[3] - bbox[1]
             except Exception:
-                font = None
+                tw, th = len(label) * (font_size // 2), font_size + 2
+            if tw <= avail_w and th <= avail_h:
+                break
+            font_size -= 1
+        else:
+            return  # can't fit even at min size
 
         if font is None:
             return
-
-        try:
-            bbox = draw.textbbox((0, 0), label, font=font)
-            tw = bbox[2] - bbox[0]
-            th = bbox[3] - bbox[1]
-        except Exception:
-            tw, th = len(label) * 7, font_size + 2
 
         text_x = px - tw / 2
         text_y = py - th / 2
@@ -577,33 +637,24 @@ class FloorplanRenderer:
         ]
         placed = False
         for dx, dy in offsets:
-            candidate = (text_x + dx, text_y + dy, text_x + dx + tw, text_y + dy + th)
-            if not self._bbox_overlaps(candidate, occupied_rects):
-                text_x += dx
-                text_y += dy
+            cx_new = text_x + dx
+            cy_new = text_y + dy
+            candidate = (cx_new - 3, cy_new - 3, cx_new + tw + 3, cy_new + th + 3)
+            inside = poly_px is None or all(
+                poly_px.contains(Point(c))
+                for c in [(cx_new, cy_new), (cx_new + tw, cy_new),
+                           (cx_new, cy_new + th), (cx_new + tw, cy_new + th)]
+            )
+            if inside and not self._bbox_overlaps(candidate, occupied_rects):
+                text_x = cx_new
+                text_y = cy_new
                 placed = True
                 break
 
         if not placed:
-            # Shrink font and try center only
-            font_size = max(7, font_size - 3)
-            try:
-                font = ImageFont.truetype("Arial", font_size)
-            except (OSError, IOError):
-                pass
-            try:
-                bbox = draw.textbbox((0, 0), label, font=font)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-            except Exception:
-                tw, th = len(label) * 5, font_size + 2
-            text_x = px - tw / 2
-            text_y = py - th / 2
-            label_bbox = (text_x, text_y, text_x + tw, text_y + th)
-            if self._bbox_overlaps(label_bbox, occupied_rects):
-                return  # skip entirely rather than overlap
+            return  # skip entirely rather than clip or overlap
 
-        label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+        label_bbox = (text_x - 3, text_y - 3, text_x + tw + 3, text_y + th + 3)
         occupied_rects.append(label_bbox)
         draw.text((text_x, text_y), label, fill=style.wall_color, font=font)
 
