@@ -58,8 +58,18 @@ class FloorplanRenderer:
             self._draw_wall_junctions(draw, space, style, transform)
 
         # 3. Doors and windows (drawn on top of walls)
+        # Deduplicate shared walls: two rooms sharing a wall both have their
+        # own Wall object with independent openings.  Use a canonical key
+        # (sorted endpoints) so each physical wall is only drawn once.
+        drawn_walls: set[tuple] = set()
         for space in floorplan.spaces:
             for wall in space.walls:
+                if not wall.openings:
+                    continue
+                key = self._wall_key(wall)
+                if key in drawn_walls:
+                    continue
+                drawn_walls.add(key)
                 for opening in wall.openings:
                     if opening.type == OpeningType.DOOR:
                         self._draw_door(draw, wall, opening, style, transform)
@@ -124,6 +134,21 @@ class FloorplanRenderer:
         offset_y = (size - extent_y * scale) / 2 - min_y * scale
 
         return {"scale": scale, "offset_x": offset_x, "offset_y": offset_y}
+
+    # ------------------------------------------------------------------ #
+    # Wall deduplication
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _wall_key(wall: Wall) -> tuple:
+        """Canonical key for a physical wall, independent of endpoint order.
+
+        Rounds coordinates to 1 mm so that reversed copies of a shared wall
+        (Room A's p1→p2 vs Room B's p2→p1) produce the same key.
+        """
+        a = (round(wall.p1[0], 0), round(wall.p1[1], 0))
+        b = (round(wall.p2[0], 0), round(wall.p2[1], 0))
+        return (min(a, b), max(a, b))
 
     # ------------------------------------------------------------------ #
     # Coordinate conversion
