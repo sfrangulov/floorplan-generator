@@ -55,6 +55,7 @@ class FloorplanRenderer:
         for space in floorplan.spaces:
             for wall in space.walls:
                 self._draw_wall(draw, wall, style, transform)
+            self._draw_wall_junctions(draw, space, style, transform)
 
         # 3. Doors and windows (drawn on top of walls)
         for space in floorplan.spaces:
@@ -73,8 +74,9 @@ class FloorplanRenderer:
 
         # 5. Labels
         if style.show_labels:
+            placed_labels: list[tuple[float, float, float, float]] = []
             for space in floorplan.spaces:
-                self._draw_label(draw, space, style, transform)
+                self._draw_label(draw, space, style, transform, placed_labels)
 
         return img
 
@@ -149,10 +151,72 @@ class FloorplanRenderer:
     # ------------------------------------------------------------------ #
 
     def _draw_wall(self, draw: ImageDraw.ImageDraw, wall: Wall, style, transform: dict) -> None:
-        """Draw a wall as a thick line."""
-        p1 = self._to_px(wall.p1[0], wall.p1[1], transform)
-        p2 = self._to_px(wall.p2[0], wall.p2[1], transform)
-        draw.line([p1, p2], fill=style.wall_color, width=style.line_width)
+        """Draw a wall as a filled rectangle using wall.thickness."""
+        p1 = np.array(self._to_px(wall.p1[0], wall.p1[1], transform))
+        p2 = np.array(self._to_px(wall.p2[0], wall.p2[1], transform))
+
+        wall_vec = p2 - p1
+        wall_len = float(np.linalg.norm(wall_vec))
+        if wall_len < 1e-6:
+            return
+
+        # Compute half-thickness in pixels (at least style.line_width / 2)
+        half_thick_px = max(wall.thickness * transform["scale"] / 2.0, style.line_width / 2.0)
+
+        # Perpendicular unit vector
+        perp = np.array([-wall_vec[1], wall_vec[0]]) / wall_len
+
+        # Four corners of the wall rectangle
+        offset = perp * half_thick_px
+        corners = [
+            tuple(p1 + offset),
+            tuple(p2 + offset),
+            tuple(p2 - offset),
+            tuple(p1 - offset),
+        ]
+        draw.polygon(corners, fill=style.wall_color)
+
+    def _draw_wall_junctions(self, draw: ImageDraw.ImageDraw, space: Space, style, transform: dict) -> None:
+        """Fill corner junctions between consecutive walls to eliminate gaps."""
+        walls = space.walls
+        if len(walls) < 2:
+            return
+
+        for i in range(len(walls)):
+            w1 = walls[i]
+            w2 = walls[(i + 1) % len(walls)]
+
+            # Find the shared endpoint (w1.p2 should match w2.p1 for consecutive walls)
+            # Check both orderings for robustness
+            p1_end = np.array(w1.p2)
+            p2_start = np.array(w2.p1)
+            dist = float(np.linalg.norm(p1_end - p2_start))
+
+            if dist < 1e-3:
+                junction_mm = p1_end
+            else:
+                # Try reversed match
+                p2_end = np.array(w2.p2)
+                dist2 = float(np.linalg.norm(p1_end - p2_end))
+                if dist2 < 1e-3:
+                    junction_mm = p1_end
+                else:
+                    continue
+
+            junction_px = np.array(self._to_px(junction_mm[0], junction_mm[1], transform))
+            half_size = max(
+                w1.thickness * transform["scale"] / 2.0,
+                w2.thickness * transform["scale"] / 2.0,
+                style.line_width / 2.0,
+            )
+
+            corners = [
+                (junction_px[0] - half_size, junction_px[1] - half_size),
+                (junction_px[0] + half_size, junction_px[1] - half_size),
+                (junction_px[0] + half_size, junction_px[1] + half_size),
+                (junction_px[0] - half_size, junction_px[1] + half_size),
+            ]
+            draw.polygon(corners, fill=style.wall_color)
 
     # ------------------------------------------------------------------ #
     # Door drawing
@@ -194,7 +258,7 @@ class FloorplanRenderer:
         door_end_px = np.array(self._to_px(door_end_mm[0], door_end_mm[1], transform))
 
         # Clear wall segment behind door (draw background color)
-        clear_width = max(style.line_width + 2, 3)
+        clear_width = max(int(wall.thickness * transform["scale"]) + 2, style.line_width + 2, 3)
         draw.line(
             [tuple(door_start_px), tuple(door_end_px)],
             fill=style.bg_color,
@@ -225,7 +289,10 @@ class FloorplanRenderer:
             normal_px = normal_px / norm_len
 
         # Arc bounding box centered on hinge
-        radius = door_width_px
+        max_radius = max(15.0, self.config.image_size * 0.08)
+        radius = min(door_width_px, max_radius)
+        if radius < 4:
+            return
         bbox = [
             hinge_px[0] - radius,
             hinge_px[1] - radius,
@@ -300,7 +367,7 @@ class FloorplanRenderer:
         win_start_px = np.array(self._to_px(win_start_mm[0], win_start_mm[1], transform))
         win_end_px = np.array(self._to_px(win_end_mm[0], win_end_mm[1], transform))
 
-        clear_width = max(style.line_width + 2, 3)
+        clear_width = max(int(wall.thickness * transform["scale"]) + 2, style.line_width + 2, 3)
         draw.line(
             [tuple(win_start_px), tuple(win_end_px)],
             fill=style.bg_color,
@@ -396,39 +463,98 @@ class FloorplanRenderer:
     # Room labels
     # ------------------------------------------------------------------ #
 
-    def _draw_label(self, draw: ImageDraw.ImageDraw, space: Space, style, transform: dict) -> None:
-        """Draw room type label at the polygon centroid."""
+    def _draw_label(
+        self,
+        draw: ImageDraw.ImageDraw,
+        space: Space,
+        style,
+        transform: dict,
+        placed_labels: list[tuple[float, float, float, float]],
+    ) -> None:
+        """Draw room type label inside the polygon with adaptive sizing and overlap avoidance."""
         try:
             poly = Polygon([(pt[0], pt[1]) for pt in space.polygon])
             if poly.is_empty or not poly.is_valid:
                 return
-            centroid = poly.centroid
-            cx, cy = centroid.x, centroid.y
+            # representative_point() is guaranteed to be inside the polygon
+            rep = poly.representative_point()
+            cx, cy = rep.x, rep.y
         except Exception:
-            # Fallback: average of polygon points
             xs = [pt[0] for pt in space.polygon]
             ys = [pt[1] for pt in space.polygon]
             cx = sum(xs) / len(xs)
             cy = sum(ys) / len(ys)
 
         px, py = self._to_px(cx, cy, transform)
-
         label = space.type.value.upper()
 
+        # Scale font size based on room area in pixel space
         try:
-            font = ImageFont.truetype("Arial", 11)
+            area_mm2 = poly.area
+        except Exception:
+            area_mm2 = 1e6
+        area_px2 = area_mm2 * (transform["scale"] ** 2)
+        font_size = int(math.sqrt(area_px2) * 0.12)
+        font_size = max(8, min(font_size, 16))
+
+        try:
+            font = ImageFont.truetype("Arial", font_size)
         except (OSError, IOError):
             try:
                 font = ImageFont.load_default()
             except Exception:
                 font = None
 
-        if font is not None:
+        if font is None:
+            return
+
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except Exception:
+            tw, th = len(label) * 7, font_size + 2
+
+        text_x = px - tw / 2
+        text_y = py - th / 2
+        label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+
+        # Check for overlap with already-placed labels and nudge if needed
+        for _ in range(4):
+            if not self._bbox_overlaps(label_bbox, placed_labels):
+                break
+            # Nudge downward
+            text_y += th + 2
+            label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+
+        # If still overlapping after nudges, shrink font
+        if self._bbox_overlaps(label_bbox, placed_labels):
+            font_size = max(7, font_size - 3)
+            try:
+                font = ImageFont.truetype("Arial", font_size)
+            except (OSError, IOError):
+                pass
             try:
                 bbox = draw.textbbox((0, 0), label, font=font)
                 tw = bbox[2] - bbox[0]
                 th = bbox[3] - bbox[1]
             except Exception:
-                tw, th = len(label) * 7, 12
-            text_pos = (px - tw / 2, py - th / 2)
-            draw.text(text_pos, label, fill=style.wall_color, font=font)
+                tw, th = len(label) * 5, font_size + 2
+            text_x = px - tw / 2
+            text_y = py - th / 2
+            label_bbox = (text_x, text_y, text_x + tw, text_y + th)
+
+        placed_labels.append(label_bbox)
+        draw.text((text_x, text_y), label, fill=style.wall_color, font=font)
+
+    @staticmethod
+    def _bbox_overlaps(
+        bbox: tuple[float, float, float, float],
+        others: list[tuple[float, float, float, float]],
+    ) -> bool:
+        """Check if bbox overlaps with any bbox in the list."""
+        x1, y1, x2, y2 = bbox
+        for ox1, oy1, ox2, oy2 in others:
+            if x1 < ox2 and x2 > ox1 and y1 < oy2 and y2 > oy1:
+                return True
+        return False
